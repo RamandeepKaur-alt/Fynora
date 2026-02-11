@@ -1,5 +1,7 @@
 # Fynora 🚀
 
+🌐 **Live Demo:** [Visit Fynora](https://fynora.vercel.app)
+
 **Fynora is a modern personal cloud workspace to upload, organize, search, and protect files.**  
 It combines clean file management with smart features like **Magic Lens summaries**, **Voice Search**, and **folder lock protection**.
 
