@@ -1,0 +1,443 @@
+import { PrismaClient } from "@prisma/client";
+import cloudinary from "../config/cloudinary.js";
+
+const prisma = new PrismaClient();
+
+export const uploadFile = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const fileBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+
+    const result = await cloudinary.uploader.upload(fileBase64, {
+      folder: "fynora",
+      resource_type: "raw"   // supports PDF, DOCX, ZIP, XLSX, etc.
+    });
+
+    const file = await prisma.file.create({
+      data: {
+        name: req.file.originalname,
+        url: result.secure_url,
+        folderId: parseInt(req.body.folderId),
+        userId: req.user.id,
+        fileType: req.file.mimetype
+      }
+    });
+
+    return res.json(file);
+
+  } catch (error) {
+    console.error("UPLOAD ERROR:", error);
+    res.status(500).json({ error: "Upload failed" });
+  }
+};
+
+// Unlock a locked file (clear isLocked flag)
+export const unlockFile = async (req, res) => {
+    try {
+        const fileId = Number(req.params.id);
+        const userId = req.user.id;
+
+        const file = await prisma.file.findUnique({ where: { id: fileId } });
+        if (!file) return res.status(404).json({ error: "File not found" });
+
+        if (file.userId !== userId) {
+            return res.status(403).json({ error: "Unauthorized" });
+        }
+
+        if (!file.isLocked) {
+            return res.status(400).json({ error: "File is not locked" });
+        }
+
+        const updated = await prisma.file.update({
+            where: { id: fileId },
+            data: { isLocked: false },
+        });
+
+        res.json({ message: "File unlocked", file: updated });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Create a file inside folder (legacy - for compatibility)
+export const createFile = async (req, res) => {
+    try {
+        const { name, folderId } = req.body;
+        const userId = req.user.id;
+
+        if (!name || !folderId) {
+            return res.status(400).json({ error: "Name and folderId are required" });
+        }
+
+        const folder = await prisma.folder.findUnique({ where: { id: Number(folderId) } });
+        if (!folder) return res.status(404).json({ error: "Folder not found" });
+
+        if (folder.userId !== userId) {
+            return res.status(403).json({ error: "Unauthorized" });
+        }
+
+        const file = await prisma.file.create({
+            data: {
+                name,
+                folderId: Number(folderId),
+                userId,
+                url: "placeholder.txt",
+                size: 0,
+                mimetype: "text/plain"
+            }
+        });
+
+        res.json({ message: "File created", file });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+
+// Get ALL files inside a folder (or root files if folderId is null)
+export const getFilesInFolder = async (req, res) => {
+    try {
+        const folderIdParam = req.params.folderId;
+        const userId = req.user.id;
+
+        // If folderId is "root" or not provided, get root files (folderId = null)
+        const folderId = folderIdParam === "root" || !folderIdParam ? null : Number(folderIdParam);
+
+        const files = await prisma.file.findMany({
+            where: {
+                folderId: folderId,
+                userId: userId,
+            },
+            orderBy: { createdAt: "desc" }
+        });
+
+        res.json({ files });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Get all locked files for the authenticated user
+export const getLockedFiles = async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        const files = await prisma.file.findMany({
+            where: {
+                userId,
+                isLocked: true,
+            },
+            orderBy: { createdAt: "desc" },
+        });
+
+        res.json({ files });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Get root files (files with no parent folder)
+export const getRootFiles = async (req, res) => {
+    try {
+        if (!req.user || !req.user.id) {
+            console.warn("getRootFiles: req.user or req.user.id is missing");
+            return res.status(401).json({ error: "User ID not found in token" });
+        }
+
+        const userId = req.user.id;
+
+        const files = await prisma.file.findMany({
+            where: {
+                folderId: null,
+                userId,
+            },
+            // Order by ID to avoid relying on createdAt column existence
+            orderBy: { id: "desc" },
+        });
+
+        console.log(`Fetched ${files.length} root files for user ${userId}`);
+        return res.json({ files });
+
+    } catch (error) {
+        console.error("Error fetching root files:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch root files" });
+    }
+};
+
+// Get most recently updated files for the authenticated user (global Recents)
+// Supports GET /api/files/recent
+export const getRecentFiles = async (req, res) => {
+    try {
+        if (!req.user || !req.user.id) {
+            console.warn("getRecentFiles: req.user or req.user.id is missing");
+            return res.status(401).json({ error: "User ID not found in token" });
+        }
+
+        const userId = req.user.id;
+
+        const files = await prisma.file.findMany({
+            where: {
+                userId,
+            },
+            // Order by ID to avoid relying on createdAt column existence
+            orderBy: {
+                id: "desc",
+            },
+            take: 50,
+        });
+
+        return res.json({ files });
+    } catch (error) {
+        console.error("getRecentFiles error:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch recent files" });
+    }
+};
+
+// Get files by category name for the authenticated user
+// Supports GET /api/files?category=name
+// - Always returns JSON and never 404s for missing categories
+// - If category does not exist for this user, it is auto-created
+export const getFilesByCategory = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { category } = req.query;
+
+        if (!userId) {
+            return res.status(401).json({ error: "User ID not found in token" });
+        }
+
+        // If no category is provided, fall back to root files
+        if (!category || typeof category !== "string" || !category.trim()) {
+            const files = await prisma.file.findMany({
+                where: {
+                    userId,
+                    folderId: null,
+                },
+                orderBy: { createdAt: "desc" },
+            });
+
+            return res.json({ category: null, files });
+        }
+
+        const normalizedName = category.trim();
+
+        // Resolve or create the category for this user using { name, userId }
+        let categoryRecord = await prisma.category.findFirst({
+            where: {
+                name: normalizedName,
+                userId,
+            },
+        });
+
+        if (!categoryRecord) {
+            categoryRecord = await prisma.category.create({
+                data: {
+                    name: normalizedName,
+                    userId,
+                },
+            });
+        }
+
+        const files = await prisma.file.findMany({
+            where: {
+                userId,
+                categoryId: categoryRecord.id,
+            },
+            orderBy: { createdAt: "desc" },
+        });
+
+        return res.json({ category: categoryRecord, files });
+    } catch (error) {
+        console.error("getFilesByCategory error:", error);
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+// Serve file (for downloads/previews)
+export const serveFile = async (req, res) => {
+    try {
+        const fileId = Number(req.params.id);
+        const userId = req.user.id;
+
+        const file = await prisma.file.findUnique({ where: { id: fileId } });
+        if (!file) {
+            return res.status(404).json({ error: "File not found" });
+        }
+
+        if (file.userId !== userId) {
+            return res.status(403).json({ error: "Unauthorized" });
+        }
+
+        if (!file.url) {
+            return res.status(400).json({ error: "File URL is missing" });
+        }
+
+        // Since file.url is always a Cloudinary URL, just redirect to it
+        return res.redirect(file.url);
+
+    } catch (error) {
+        console.error("serveFile error:", error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
+    }
+};
+
+
+// Get SINGLE file info
+export const getSingleFile = async (req, res) => {
+    try {
+        const fileId = Number(req.params.id);
+
+        const file = await prisma.file.findUnique({ where: { id: fileId } });
+
+        if (!file) return res.status(404).json({ error: "File not found" });
+
+        res.json({ file });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+
+// Delete file
+export const deleteFile = async (req, res) => {
+    try {
+        const fileId = Number(req.params.id);
+        const userId = req.user.id;
+
+        const file = await prisma.file.findUnique({ where: { id: fileId } });
+        if (!file) return res.status(404).json({ error: "File not found" });
+
+        // Check if user owns the file
+        if (file.userId !== userId) {
+            return res.status(403).json({ error: "Unauthorized" });
+        }
+
+        // Try to delete from Cloudinary using the URL
+        if (file.url) {
+            try {
+                const url = new URL(file.url);
+                const parts = url.pathname.split("/");
+                const uploadIndex = parts.findIndex((p) => p === "upload");
+
+                if (uploadIndex !== -1 && parts.length > uploadIndex + 1) {
+                    const publicIdWithVersionAndExt = parts.slice(uploadIndex + 1).join("/");
+                    const withoutVersion = publicIdWithVersionAndExt.replace(/^v\d+\//, "");
+                    const lastDotIndex = withoutVersion.lastIndexOf(".");
+                    const publicId =
+                        lastDotIndex === -1
+                            ? withoutVersion
+                            : withoutVersion.substring(0, lastDotIndex);
+
+                    await cloudinary.uploader.destroy(publicId, {
+                        resource_type: "auto",
+                    });
+                }
+            } catch (cloudinaryError) {
+                console.error("Failed to delete file from Cloudinary:", cloudinaryError);
+                // Continue even if Cloudinary deletion fails
+            }
+        }
+
+        // Delete from database
+        await prisma.file.delete({ where: { id: fileId } });
+
+        res.json({ message: "File deleted successfully" });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Move file to a different folder
+export const moveFile = async (req, res) => {
+    try {
+        const fileId = Number(req.params.id);
+        const { folderId } = req.body;
+
+        const file = await prisma.file.findUnique({ where: { id: fileId } });
+        if (!file) return res.status(404).json({ error: "File not found" });
+
+        if (file.userId !== req.user.id)
+            return res.status(403).json({ error: "Unauthorized" });
+
+        // If folderId is provided, verify it exists and belongs to user
+        let finalFolderId = null;
+        if (folderId !== null && folderId !== undefined && folderId !== "") {
+            finalFolderId = Number(folderId);
+            const targetFolder = await prisma.folder.findUnique({ where: { id: finalFolderId } });
+            if (!targetFolder) {
+                return res.status(404).json({ error: "Destination folder not found" });
+            }
+            if (targetFolder.userId !== req.user.id) {
+                return res.status(403).json({ error: "Unauthorized to move to this folder" });
+            }
+        }
+
+        const updated = await prisma.file.update({
+            where: { id: fileId },
+            data: { folderId: finalFolderId },
+        });
+
+        res.json({ message: "File moved", file: updated });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Assign a file to a category
+export const assignCategoryToFile = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { fileId, categoryId } = req.body;
+
+        if (!userId) {
+            return res.status(401).json({ error: "User ID missing from token" });
+        }
+
+        if (!fileId || !categoryId) {
+            return res.status(400).json({ error: "fileId and categoryId are required" });
+        }
+
+        const numericFileId = Number(fileId);
+        const numericCategoryId = Number(categoryId);
+
+        if (Number.isNaN(numericFileId) || Number.isNaN(numericCategoryId)) {
+            return res.status(400).json({ error: "fileId and categoryId must be numbers" });
+        }
+
+        const file = await prisma.file.findUnique({ where: { id: numericFileId } });
+        if (!file) {
+            return res.status(404).json({ error: "File not found" });
+        }
+        if (file.userId !== userId) {
+            return res.status(403).json({ error: "Unauthorized to modify this file" });
+        }
+
+        const category = await prisma.category.findUnique({ where: { id: numericCategoryId } });
+        if (!category) {
+            return res.status(404).json({ error: "Category not found" });
+        }
+
+        if (category.userId !== null && category.userId !== userId) {
+            return res.status(403).json({ error: "Unauthorized to use this category" });
+        }
+
+        const updated = await prisma.file.update({
+            where: { id: numericFileId },
+            data: { categoryId: numericCategoryId },
+        });
+
+        return res.json({ message: "Category assigned to file", file: updated });
+    } catch (error) {
+        console.error("assignCategoryToFile error:", error);
+        return res.status(500).json({ error: error.message });
+    }
+};
