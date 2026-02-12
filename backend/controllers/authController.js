@@ -22,13 +22,18 @@ export const signup = async(req, res) =>{
         // Normalize email to lowercase for case-insensitive comparison and storage
         const normalizedEmail = email.toLowerCase().trim();
 
-        // Case-insensitive duplicate email check using raw query for PostgreSQL
-        // This ensures we catch duplicates regardless of case
-        const existingUser = await prisma.$queryRaw`
-            SELECT id, email FROM "User" WHERE LOWER(email) = LOWER(${normalizedEmail}) LIMIT 1
-        `;
+        // Case-insensitive duplicate email check via Prisma query API
+        const existingUser = await prisma.user.findFirst({
+            where: {
+                email: {
+                    equals: normalizedEmail,
+                    mode: "insensitive"
+                }
+            },
+            select: { id: true, email: true }
+        });
 
-        if (existingUser && existingUser.length > 0) {
+        if (existingUser) {
             return res.status(400).json({error: "This account is already registered. Continue to login."});
         }
 
@@ -69,17 +74,24 @@ export const login = async(req, res) =>{
     try{
         const{ email , password } = req.body;
 
+        if(!email || !password) {
+            return res.status(400).json({error: "Email and password are required"});
+        }
+
         // Normalize email to lowercase for case-insensitive lookup
         const normalizedEmail = email.toLowerCase().trim();
 
-        // Case-insensitive email lookup using raw SQL query
-        const users = await prisma.$queryRaw`
-            SELECT * FROM "User" WHERE LOWER(email) = LOWER(${normalizedEmail}) LIMIT 1
-        `;
+        // Case-insensitive email lookup via Prisma query API
+        const user = await prisma.user.findFirst({
+            where: {
+                email: {
+                    equals: normalizedEmail,
+                    mode: "insensitive"
+                }
+            }
+        });
 
-        if(!users || users.length === 0) return res.status(400).json({error: "Invalid email or password"});
-
-        const user = users[0];
+        if(!user) return res.status(400).json({error: "Invalid email or password"});
 
         const match = await bcrypt.compare(password , user.password);
         if(!match) return res.status(400).json({ error: "Invalid email or password"});
