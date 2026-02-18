@@ -183,11 +183,6 @@ npm run dev
 
 ---
 
-## Live Demo
-
-🌐 Live: https://frontend-fy.vercel.app/
-
----
 
 ## Deployment Strategy
 
