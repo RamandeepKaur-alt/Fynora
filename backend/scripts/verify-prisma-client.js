@@ -11,8 +11,15 @@ async function verifyPrismaClient() {
   console.log('🔍 Verifying Prisma Client...\n');
 
   try {
+    if (!prisma.user || typeof prisma.user.findUnique !== 'function') {
+      console.error('❌ Prisma Client does not expose the User model.');
+      console.error('   This usually means prisma/schema.prisma is missing model definitions.');
+      console.error('   Ensure the User model exists in schema.prisma, then run: npx prisma generate\n');
+      return false;
+    }
+
     // Try to query with googleId field
-    const testQuery = await prisma.user.findUnique({
+    await prisma.user.findUnique({
       where: { googleId: 'test-verification' },
       select: {
         id: true,
@@ -27,8 +34,7 @@ async function verifyPrismaClient() {
 
     console.log('✅ Prisma Client recognizes googleId field');
     console.log('✅ All Google OAuth fields are available\n');
-    
-    // Check schema fields
+
     const userFields = [
       'googleId',
       'googleEmail',
@@ -57,10 +63,10 @@ async function verifyPrismaClient() {
       console.error('   2. Run: cd backend && npx prisma generate');
       console.error('   3. Restart your server\n');
       return false;
-    } else {
-      console.error('❌ Unexpected error:', error.message);
-      return false;
     }
+
+    console.error('❌ Unexpected error:', error.message);
+    return false;
   } finally {
     await prisma.$disconnect();
   }
@@ -74,21 +80,3 @@ verifyPrismaClient()
     console.error('Fatal error:', error);
     process.exit(1);
   });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
